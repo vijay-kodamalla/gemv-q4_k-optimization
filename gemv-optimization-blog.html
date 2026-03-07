@@ -1,0 +1,830 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>I Built a Quantized GEMV Kernel from Scratch — Vijay Prabhas Kodamalla</title>
+<meta name="description" content="6 CUDA kernel variants, systematic Nsight Compute profiling on A100, and why simpler code wins in memory-bound GPU workloads.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=Source+Serif+4:ital,opsz,wght@0,8..60,300;0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=DM+Sans:ital,wght@0,400;0,500;0,600;0,700;1,400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0c0c0e;
+    --bg-raised: #141418;
+    --bg-code: #1a1a22;
+    --border: #2a2a35;
+    --text: #c8c8d0;
+    --text-dim: #78788a;
+    --text-bright: #ededf0;
+    --accent: #6ee7b7;
+    --accent-dim: #2d6e56;
+    --red: #f87171;
+    --red-dim: #7f1d1d;
+    --yellow: #fbbf24;
+    --blue: #60a5fa;
+    --orange: #fb923c;
+    --serif: 'Source Serif 4', Georgia, serif;
+    --sans: 'DM Sans', system-ui, sans-serif;
+    --mono: 'IBM Plex Mono', 'Fira Code', monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--serif);
+    font-size: 18px;
+    line-height: 1.75;
+    -webkit-font-smoothing: antialiased;
+  }
+  .hero {
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 80px 24px 48px;
+    border-bottom: 1px solid var(--border);
+  }
+  .hero-tag {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 24px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .hero-tag::before {
+    content: '';
+    display: inline-block;
+    width: 32px;
+    height: 1px;
+    background: var(--accent);
+  }
+  h1 {
+    font-family: var(--sans);
+    font-size: clamp(32px, 5vw, 48px);
+    font-weight: 700;
+    line-height: 1.15;
+    color: var(--text-bright);
+    margin-bottom: 24px;
+    letter-spacing: -0.5px;
+  }
+  .hero-subtitle {
+    font-size: 20px;
+    color: var(--text-dim);
+    line-height: 1.6;
+    max-width: 640px;
+    font-style: italic;
+  }
+  .hero-meta {
+    margin-top: 32px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+  }
+  .meta-chip {
+    font-family: var(--mono);
+    font-size: 13px;
+    color: var(--text-dim);
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    padding: 6px 14px;
+    border-radius: 6px;
+  }
+  .author-block {
+    margin-top: 36px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .author-avatar {
+    width: 42px;
+    height: 42px;
+    border-radius: 50%;
+    background: linear-gradient(135deg, var(--accent-dim), #1a3a4a);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--sans);
+    font-weight: 700;
+    font-size: 16px;
+    color: var(--accent);
+  }
+  .author-info { font-family: var(--sans); }
+  .author-name { font-weight: 600; font-size: 15px; color: var(--text-bright); }
+  .author-title { font-size: 13px; color: var(--text-dim); }
+  article {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 56px 24px 100px;
+  }
+  article p { margin-bottom: 24px; }
+  article strong { color: var(--text-bright); font-weight: 600; }
+  h2 {
+    font-family: var(--sans);
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--text-bright);
+    margin-top: 64px;
+    margin-bottom: 24px;
+    letter-spacing: -0.3px;
+    position: relative;
+    padding-left: 20px;
+  }
+  h2::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 6px;
+    bottom: 6px;
+    width: 3px;
+    background: var(--accent);
+    border-radius: 2px;
+  }
+  h3 {
+    font-family: var(--sans);
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--text-bright);
+    margin-top: 40px;
+    margin-bottom: 16px;
+  }
+  pre {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 24px;
+    overflow-x: auto;
+    margin: 24px 0 28px;
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.65;
+    color: #b8b8c8;
+  }
+  code {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: var(--bg-code);
+    padding: 2px 7px;
+    border-radius: 4px;
+    color: var(--accent);
+  }
+  pre code { background: none; padding: 0; color: inherit; }
+  .code-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    margin-bottom: 8px;
+  }
+  .kw { color: #c792ea; }
+  .type { color: #82aaff; }
+  .num { color: #f78c6c; }
+  .fn { color: #82aaff; }
+  .cmt { color: #546e7a; font-style: italic; }
+  .ncu-readout {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px 24px;
+    margin: 20px 0 28px;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 1.7;
+    color: var(--text-dim);
+  }
+  .ncu-readout .ncu-line {
+    display: flex;
+    gap: 8px;
+    align-items: baseline;
+  }
+  .ncu-readout .arrow { color: var(--text-dim); user-select: none; flex-shrink: 0; }
+  .ncu-readout .val { color: var(--text-bright); font-weight: 500; }
+  .ncu-readout .bad { color: var(--red); font-weight: 500; }
+  .ncu-readout .good { color: var(--accent); font-weight: 500; }
+  .ncu-readout .warn { color: var(--yellow); font-weight: 500; }
+  .ncu-readout .note {
+    color: var(--text-dim);
+    font-style: italic;
+    margin-left: 24px;
+    display: block;
+    font-size: 12.5px;
+    margin-top: -2px;
+    margin-bottom: 4px;
+  }
+  .perf-chart {
+    margin: 32px 0;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 28px 24px;
+  }
+  .perf-chart-title {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 24px;
+  }
+  .bar-row {
+    display: flex;
+    align-items: center;
+    margin-bottom: 14px;
+    gap: 12px;
+  }
+  .bar-label {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-dim);
+    width: 130px;
+    text-align: right;
+    flex-shrink: 0;
+  }
+  .bar-track {
+    flex: 1;
+    height: 30px;
+    background: #1a1a22;
+    border-radius: 4px;
+    position: relative;
+    overflow: hidden;
+  }
+  .bar-fill {
+    height: 100%;
+    border-radius: 4px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    padding-right: 10px;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--bg);
+  }
+  .bar-fill.red { background: linear-gradient(90deg, #7f1d1d, #f87171); color: #fff; }
+  .bar-fill.yellow { background: linear-gradient(90deg, #78350f, #fbbf24); }
+  .bar-fill.green { background: linear-gradient(90deg, #064e3b, #6ee7b7); }
+  .bar-fill.blue { background: linear-gradient(90deg, #1e3a5f, #60a5fa); color: #fff; }
+  .bar-fill.orange { background: linear-gradient(90deg, #7c2d12, #fb923c); color: #fff; }
+  .insight {
+    background: linear-gradient(135deg, #0f1a16, #111318);
+    border: 1px solid var(--accent-dim);
+    border-radius: 10px;
+    padding: 24px;
+    margin: 28px 0;
+    position: relative;
+  }
+  .insight::before {
+    content: '\2192';
+    position: absolute;
+    top: 24px;
+    left: -14px;
+    background: var(--accent-dim);
+    color: var(--accent);
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 700;
+  }
+  .insight p { margin-bottom: 0; font-size: 17px; }
+  .insight strong { color: var(--accent); }
+  .warning-insight {
+    background: linear-gradient(135deg, #1a1210, #131318);
+    border-color: #7f1d1d;
+  }
+  .warning-insight::before { background: #7f1d1d; color: var(--red); content: '\2715'; }
+  .comparison {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 28px 0;
+    font-family: var(--sans);
+    font-size: 14px;
+  }
+  .comparison th {
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-size: 11px;
+    padding: 12px 10px;
+    border-bottom: 2px solid var(--border);
+    text-align: left;
+    white-space: nowrap;
+  }
+  .comparison td {
+    padding: 10px 10px;
+    border-bottom: 1px solid #1a1a22;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 12.5px;
+  }
+  .comparison tr:hover td { background: rgba(255,255,255,0.02); }
+  .comparison .highlight td { background: rgba(110, 231, 183, 0.06); }
+  .comparison .target td { background: rgba(96, 165, 250, 0.06); }
+  .comparison .worst td { background: rgba(248, 113, 113, 0.04); }
+  .table-scroll { overflow-x: auto; margin: 28px 0; }
+  .section-divider {
+    border: none;
+    height: 1px;
+    background: var(--border);
+    margin: 56px 0;
+  }
+  .footer {
+    max-width: 720px;
+    margin: 0 auto;
+    padding: 0 24px 80px;
+  }
+  .cta-box {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 36px;
+    text-align: center;
+  }
+  .cta-box h3 { margin-top: 0; margin-bottom: 12px; font-family: var(--sans); }
+  .cta-box p { color: var(--text-dim); font-size: 16px; margin-bottom: 24px; }
+  .cta-links { display: flex; justify-content: center; gap: 16px; flex-wrap: wrap; }
+  .cta-link {
+    font-family: var(--mono);
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--accent);
+    text-decoration: none;
+    padding: 10px 24px;
+    border: 1px solid var(--accent-dim);
+    border-radius: 8px;
+    transition: all 0.2s;
+  }
+  .cta-link:hover { background: rgba(110, 231, 183, 0.08); border-color: var(--accent); }
+  @keyframes fadeUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .hero { animation: fadeUp 0.7s ease-out; }
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
+    pointer-events: none;
+    z-index: 9999;
+  }
+  @media (max-width: 640px) {
+    .hero { padding: 48px 20px 36px; }
+    article { padding: 40px 20px 80px; }
+    h2 { font-size: 24px; margin-top: 48px; }
+    pre { font-size: 13px; padding: 16px; }
+    .bar-label { width: 90px; font-size: 11px; }
+    .ncu-readout { font-size: 12px; padding: 16px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-tag">GPU Kernel Optimization</div>
+  <h1>I Built a Quantized GEMV Kernel from Scratch. Here's Why Simpler Code Won.</h1>
+  <p class="hero-subtitle">6 CUDA kernel variants on an A100, obsessive Nsight Compute profiling, and the counterintuitive reason why the "naive" upstream kernel beats everything I tried.</p>
+  <div class="hero-meta">
+    <span class="meta-chip">NVIDIA A100 80GB PCIe</span>
+    <span class="meta-chip">Mistral 7B &middot; Q4_K</span>
+    <span class="meta-chip">CUDA C/C++</span>
+    <span class="meta-chip">llama.cpp</span>
+  </div>
+  <div class="author-block">
+    <div class="author-avatar">VK</div>
+    <div class="author-info">
+      <div class="author-name">Vijay Prabhas Kodamalla</div>
+      <div class="author-title">M.S. Computational Science &amp; Engineering &middot; Georgia Tech</div>
+    </div>
+  </div>
+</header>
+
+<article>
+
+<p>Every time a quantized LLM generates a token, a matrix-vector multiply runs against the full weight matrix. In llama.cpp's Q4_K format, this means dequantizing 4-bit weights and computing dot products simultaneously&mdash;at an arithmetic intensity of just <strong>2 ops/byte</strong>. On an A100 with ~1900 GB/s of bandwidth, that puts us firmly in the memory-bound regime.</p>
+
+<p>I wanted to understand this kernel at the deepest level. Not by reading code&mdash;by writing it from scratch, profiling every variant with Nsight Compute, and figuring out what actually makes it fast or slow on real hardware.</p>
+
+<p>I explored 6 kernel variants. I got within <strong>11% of the production upstream kernel</strong> (22.27 &mu;s vs 20.03 &mu;s). And I learned that almost everything I thought I knew about GPU optimization inverts for memory-bound workloads.</p>
+
+<div class="perf-chart">
+  <div class="perf-chart-title">Execution Time (lower is better)</div>
+  <div class="bar-row">
+    <span class="bar-label">Y-Tiling</span>
+    <div class="bar-track"><div class="bar-fill red" style="width: 100%;">80.58 &mu;s &middot; 85,800 cyc</div></div>
+  </div>
+  <div class="bar-row">
+    <span class="bar-label">W-Tiling</span>
+    <div class="bar-track"><div class="bar-fill red" style="width: 40.5%;">32.67 &mu;s</div></div>
+  </div>
+  <div class="bar-row">
+    <span class="bar-label">W-Tile+4W/CTA</span>
+    <div class="bar-track"><div class="bar-fill orange" style="width: 37%;">29.82 &mu;s</div></div>
+  </div>
+  <div class="bar-row">
+    <span class="bar-label">W-Tile+4W/2CTA</span>
+    <div class="bar-track"><div class="bar-fill orange" style="width: 37.1%;">29.92 &mu;s</div></div>
+  </div>
+  <div class="bar-row">
+    <span class="bar-label">2pack &#9733;</span>
+    <div class="bar-track"><div class="bar-fill green" style="width: 27.6%;">22.27 &mu;s</div></div>
+  </div>
+  <div class="bar-row">
+    <span class="bar-label">Upstream</span>
+    <div class="bar-track"><div class="bar-fill blue" style="width: 24.9%;">20.03 &mu;s</div></div>
+  </div>
+</div>
+
+<h2>The Q4_K Constraint</h2>
+
+<p>Here's the thing about Q4_K: each block stores 256 weights in 144 bytes. The dequantization math (<code>vec_dot_q4_K_q8_1</code>) takes an index <code>iqs</code> from {0, 2, 4, &hellip;, 30}&mdash;exactly <strong>16 possible values</strong>. That means the math kernel needs exactly 16 threads. Not 32. Sixteen.</p>
+
+<p>So the upstream llama.cpp kernel just&hellip; leaves threads 16&ndash;31 idle. Fifty percent of the warp doing nothing. My first reaction was: surely we can do better than that?</p>
+
+<p>Spoiler: it's more complicated than I thought.</p>
+
+<hr class="section-divider">
+
+<h2>Variant 1: Weight Tiling</h2>
+
+<p>The textbook optimization&mdash;tile weights into shared memory, reduce global memory traffic. I loaded 64 Q4_K blocks (9 KB) into shared memory per CTA.</p>
+
+<p>It was slower. Here's what Nsight Compute told me:</p>
+
+<div class="ncu-readout">
+  <div class="ncu-line"><span class="arrow">&rarr;</span> <span class="bad">32.67 &mu;s</span>, 34,461 cycles, 48 registers/thread</div>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Compute throughput: <span class="val">43.5%</span> &nbsp;|&nbsp; Memory throughput: <span class="val">38.36%</span></div>
+  <span class="note">Ncu complains about a latency issue&mdash;both are below 60%</span>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> ALU pipeline utilization: <span class="val">33.4%</span></div>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Scheduler: 1 instruction per <span class="bad">2 cycles</span></div>
+  <span class="note">Every scheduler is capable of issuing 1 instruction per cycle, but here it's 1 per 2. The warps are stalling somehow.</span>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Stall: each warp spends <span class="bad">4.2 cycles</span> waiting on L1TEX scoreboard</div>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Theoretical occupancy: 45.3% &nbsp;|&nbsp; Achieved: <span class="bad">31%</span></div>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> L1TEX global load problem: only <span class="bad">15.4 of 32 bytes</span> per sector utilized</div>
+  <span class="note">Ncu estimates a 20% speedup if this access pattern is fixed</span>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Uncoalesced accesses: <span class="bad">2,621,440 excessive sectors</span> (62% of 4,235,264 total)</div>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Instructions executed: <span class="val">6,434,816</span></div>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Grid: (4096,1,1) &times; (32,1,1)</div>
+</div>
+
+<p>The problem was simple in hindsight: <strong>GEMV has no data reuse</strong>. Each weight is used exactly once. In GEMM, you tile because the same weight gets reused 128 times across the output tile. In GEMV? You load the weight, multiply it, and never touch it again. So I was paying all the shared memory overhead&mdash;the occupancy hit, the L1 cache displacement, the bank conflicts&mdash;and getting nothing back.</p>
+
+<p>And look at that occupancy: theoretical 45.3%, achieved only 31%. The shared memory allocation was the limiter. On A100, shared memory and L1 share the same physical SRAM&mdash;so more shared memory literally means less L1 cache. Hit rate dropped from around 80% to 30%.</p>
+
+<div class="insight warning-insight">
+  <p><strong>Lesson: don't tile without reuse.</strong> Tiling is not universally good. It's specifically good when you amortize the overhead over many reuses. GEMM has 128&times; reuse. GEMV has 1&times;. The math doesn't work.</p>
+</div>
+
+<hr class="section-divider">
+
+<h2>Variant 2: Activation Tiling</h2>
+
+<p>Okay, weights don't have reuse. But the activation vector gets reused across every output row, right? So I staged it in shared memory.</p>
+
+<p>This was catastrophic.</p>
+
+<div class="ncu-readout">
+  <div class="ncu-line"><span class="arrow">&rarr;</span> <span class="bad">80.58 &mu;s</span>, 85,800 cycles, 40 registers/thread</div>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Compute throughput: <span class="bad">19.83%</span> &nbsp;|&nbsp; Memory throughput: <span class="bad">19.20%</span></div>
+  <span class="note">Both below 20%! Ncu is screaming about latency issues.</span>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> <span class="bad">1.7-way bank conflicts</span>, as expected</div>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Scheduler: 1 instruction per <span class="bad">4.6 cycles</span></div>
+  <span class="note">4.6 cycles per instruction! The warps are stalling catastrophically.</span>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Stall: each warp spends <span class="bad">5.6 cycles</span> waiting on L1TEX scoreboard</div>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Theoretical occupancy: 12.5% &nbsp;|&nbsp; Achieved: <span class="bad">11.82%</span></div>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Active warps per scheduler: <span class="bad">2</span> &nbsp;|&nbsp; Eligible: <span class="bad">0.25</span></div>
+  <span class="note">0.25 eligible warps! The scheduler has almost nothing to issue.</span>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Instructions executed: <span class="val">7,331,840</span></div>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Grid: (4096,1,1) &times; (32,1,1)</div>
+</div>
+
+<p>Look at those eligible warps: <strong>0.25 per scheduler</strong>. The scheduler literally has nothing to issue. Occupancy at 11.82% means almost no warps are resident to hide latency.</p>
+
+<p>But here's the real kicker: the activation vector for Mistral 7B is about 128 KB. The A100 has a <strong>40 MB L2 cache</strong>. The activations were already cached. I was staging L2-cached data into shared memory, adding 1.7-way bank conflicts and 32 <code>__syncthreads()</code> barriers (32 &times; 40 cycles &asymp; 1.28 &mu;s of pure overhead) for absolutely zero benefit.</p>
+
+<div class="insight warning-insight">
+  <p><strong>Lesson: don't stage what's already cached.</strong> Before you reach for shared memory, check if the data already lives in L2. If it does, you're adding overhead for nothing.</p>
+</div>
+
+<hr class="section-divider">
+
+<h2>Variant 3: The 2pack Strategy</h2>
+
+<p>After two failures, I took a step back. The Q4_K math needs 16 threads. I have 32 threads in a warp. Instead of trying to rewrite the math or tile data into shared memory, what if I just give the upper 16 threads <em>a second block to work on?</em></p>
+
+<p>Threads 0&ndash;15 process block K. Threads 16&ndash;31 process block K+1. Same math kernel, different data. Loop stride goes from 1 to 2&mdash;half the iterations.</p>
+
+<div class="code-label">2pack core idea</div>
+<pre><code><span class="kw">const</span> <span class="type">int</span> logical_lane = lane_id &amp; <span class="num">0xF</span>;   <span class="cmt">// 0-15 for everyone</span>
+<span class="kw">const</span> <span class="type">int</span> block_offset = lane_id >> <span class="num">4</span>;     <span class="cmt">// 0 for lower half, 1 for upper</span>
+<span class="kw">const</span> <span class="type">int</span> my_kbx = kbx + block_offset;     <span class="cmt">// Lower: block K, Upper: block K+1</span>
+
+<span class="kw">for</span> (<span class="type">int</span> kbx = start; kbx &lt; end; kbx += <span class="num">2</span>) {
+    sum += <span class="fn">vec_dot</span>(W, Y, my_kbx, iqs);
+}</code></pre>
+
+<p>And then the reduction needs an extra step&mdash;merge the two halves before the standard warp reduction:</p>
+
+<div class="code-label">2pack reduction</div>
+<pre><code><span class="cmt">// Step 1: Merge upper and lower halves</span>
+sum += <span class="fn">__shfl_xor_sync</span>(<span class="num">0xffffffff</span>, sum, <span class="num">16</span>);
+
+<span class="cmt">// Step 2: Standard reduction within lower 16</span>
+sum += <span class="fn">__shfl_down_sync</span>(mask16, sum, <span class="num">8</span>);
+sum += <span class="fn">__shfl_down_sync</span>(mask16, sum, <span class="num">4</span>);
+sum += <span class="fn">__shfl_down_sync</span>(mask16, sum, <span class="num">2</span>);
+sum += <span class="fn">__shfl_down_sync</span>(mask16, sum, <span class="num">1</span>);
+<span class="cmt">// Thread 0 has the complete warp sum</span></code></pre>
+
+<p>Now look at these numbers:</p>
+
+<div class="ncu-readout">
+  <div class="ncu-line"><span class="arrow">&rarr;</span> <span class="good">22.27 &mu;s</span>, 23,239 cycles, 48 registers/thread</div>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Compute throughput: <span class="good">62.04%</span> &nbsp;|&nbsp; Memory throughput: <span class="good">47.50%</span></div>
+  <span class="note">First time compute is above 60%! Actually utilizing the hardware.</span>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> ALU pipeline utilization: <span class="good">48.2%</span></div>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Theoretical occupancy: <span class="good">62.5%</span> &nbsp;|&nbsp; Achieved: <span class="good">52.61%</span></div>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Active warps per scheduler: <span class="good">8.52</span> &nbsp;|&nbsp; Eligible: <span class="good">2.68</span></div>
+  <span class="note">10&times; more eligible warps than activation tiling. The scheduler is happy.</span>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Instructions executed: <span class="warn">7,331,840</span></div>
+  <span class="note">Same instruction count as Y-tiling, but look at the throughput difference.</span>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Uncoalesced: <span class="warn">2,949,120 excessive sectors</span> (62% of 4,792,320 total)</div>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Grid: (4096,1,1) &times; (32,4,1)</div>
+</div>
+
+<p>This beat every tiling and async variant by 25&ndash;35%. Compute throughput crossed 60% for the first time. Occupancy jumped to 52.61%&mdash;with <strong>zero shared memory overhead</strong>. All 32 threads doing useful work.</p>
+
+<p>But: <strong>it's still 11% slower than upstream.</strong></p>
+
+<hr class="section-divider">
+
+<h2>The Other Attempts</h2>
+
+<p>I tried two more variants that combined weight tiling with 4 warps per CTA&mdash;one with a single CTA layout, one splitting across 2 CTAs. Both landed around 29.8&ndash;29.9 &mu;s. Interestingly, they had the highest occupancy and compute throughput numbers (53.72% and 62.86% respectively), but it didn't matter&mdash;the shared memory overhead for weight tiles still dragged them below 2pack.</p>
+
+<p>I also noticed L2 slice imbalance in the Nsight Compute reports: some L2 slices were 23.5% more active than the average. Uneven memory traffic across the L2 partitions&mdash;another subtle cost of the tiling approach.</p>
+
+<hr class="section-divider">
+
+<h2>The Full Picture</h2>
+
+<div class="table-scroll">
+<table class="comparison">
+  <thead>
+    <tr>
+      <th>Variant</th>
+      <th>Time</th>
+      <th>Cycles</th>
+      <th>Occupancy</th>
+      <th>Compute</th>
+      <th>Memory</th>
+      <th>Instructions</th>
+      <th>Regs</th>
+      <th>Excess Sectors</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr class="worst">
+      <td>Y-Tiling</td>
+      <td>80.58 &mu;s</td>
+      <td>85,800</td>
+      <td>11.82%</td>
+      <td>19.83%</td>
+      <td>19.20%</td>
+      <td>7,331,840</td>
+      <td>40</td>
+      <td>21%</td>
+    </tr>
+    <tr>
+      <td>W-Tiling</td>
+      <td>32.67 &mu;s</td>
+      <td>34,461</td>
+      <td>31%</td>
+      <td>43.5%</td>
+      <td>38.36%</td>
+      <td>6,434,816</td>
+      <td>48</td>
+      <td>62%</td>
+    </tr>
+    <tr>
+      <td>W-Tile+4W/CTA</td>
+      <td>29.82 &mu;s</td>
+      <td>31,463</td>
+      <td>53.72%</td>
+      <td>62.86%</td>
+      <td>44.59%</td>
+      <td>7,331,840</td>
+      <td>48</td>
+      <td>62%</td>
+    </tr>
+    <tr>
+      <td>W-Tile+4W/2CTA</td>
+      <td>29.92 &mu;s</td>
+      <td>31,591</td>
+      <td>42.90%</td>
+      <td>57.46%</td>
+      <td>44.10%</td>
+      <td>7,766,016</td>
+      <td>56</td>
+      <td>62%</td>
+    </tr>
+    <tr class="highlight">
+      <td><strong>2pack &#9733;</strong></td>
+      <td><strong>22.27 &mu;s</strong></td>
+      <td><strong>23,239</strong></td>
+      <td><strong>52.61%</strong></td>
+      <td><strong>62.04%</strong></td>
+      <td><strong>47.50%</strong></td>
+      <td><strong>7,331,840</strong></td>
+      <td><strong>48</strong></td>
+      <td><strong>62%</strong></td>
+    </tr>
+    <tr class="target">
+      <td><strong>Upstream</strong></td>
+      <td><strong>20.03 &mu;s</strong></td>
+      <td><strong>20,933</strong></td>
+      <td><strong>34.56%</strong></td>
+      <td><strong>53.58%</strong></td>
+      <td><strong>36.46%</strong></td>
+      <td><strong>4,780,032</strong></td>
+      <td><strong>66</strong></td>
+      <td><strong>60%</strong></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<p>Stare at the 2pack and upstream rows. 2pack has better occupancy (52.61% vs 34.56%), better compute throughput (62.04% vs 53.58%), better memory throughput (47.50% vs 36.46%), and uses fewer registers (48 vs 66).</p>
+
+<p><strong>And it's still slower.</strong></p>
+
+<p>The answer is in the instructions column: <strong>7,331,840 vs 4,780,032</strong>. That's 53% more instructions. And at an arithmetic intensity of 2 ops/byte, every single instruction matters.</p>
+
+<hr class="section-divider">
+
+<h2>Why the "Naive" Kernel Wins</h2>
+
+<p>The upstream kernel is dead simple. One block per warp iteration. Only 16 of 32 threads active. No indexing tricks. No half-warp merging. Straight <code>for</code> loop.</p>
+
+<p>And it produces <strong>4,780,032 instructions</strong>&mdash;the lowest of any variant.</p>
+
+<p>The instruction gap between 2pack and upstream is 2,551,808. At roughly 1 cycle per instruction on A100, that's about 2.55 &mu;s. The measured time gap is 2.24 &mu;s. That's an 88% match&mdash;the instruction overhead almost entirely explains the performance difference.</p>
+
+<p>Where do the extra instructions come from in 2pack?</p>
+
+<div class="ncu-readout">
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Indexing per iteration: <span class="val">lane_id &amp; 0xF</span>, <span class="val">lane_id >> 4</span>, <span class="val">kbx + block_offset</span>, boundary check</div>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Reduction: extra <span class="val">__shfl_xor_sync</span> to merge halves + more complex mask management</div>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Non-fused FP32: 2pack has <span class="val">327,680 non-fused</span> vs upstream's <span class="val">196,608</span></div>
+  <span class="note">More non-fused instructions means the compiler couldn't combine as many ops&mdash;the complex indexing is tying its hands.</span>
+  <div class="ncu-line"><span class="arrow">&rarr;</span> Compiler: more live values &rarr; less freedom to schedule &rarr; worse code generation</div>
+</div>
+
+<p>And notice something counterintuitive: upstream uses <strong>66 registers per thread</strong>&mdash;the most of any variant. But it doesn't matter because the code is so simple that the compiler can use those registers effectively. My 2pack uses only 48 registers but has more register <em>pressure</em> from the complex indexing, which is a different problem entirely.</p>
+
+<div class="insight">
+  <p><strong>At arithmetic intensity = 2, instruction count is everything.</strong> Occupancy, warp utilization, compute throughput&mdash;none of it matters enough to overcome a 53% instruction overhead. The kernel is so memory-starved that the bottleneck is how many instructions the GPU has to chew through between memory transactions.</p>
+</div>
+
+<hr class="section-divider">
+
+<h2>The Persistent Problem: Uncoalesced Loads</h2>
+
+<p>One thing that showed up in <em>every single variant</em>: uncoalesced global memory access when loading activations in the math kernel. Look at the excessive sector percentages across the board&mdash;62%, 62%, 62%, 62%, 60%. Nearly identical regardless of what optimization I tried.</p>
+
+<p>In the weight tiling variant, Nsight Compute explicitly flagged this: on average, only 15.4 of the 32 bytes transmitted per sector are actually utilized by each thread, with an estimated 20% speedup if fixed.</p>
+
+<p>The root cause is structural. In Q4_K format, when threads in a warp dequantize different weight blocks, the corresponding activation elements they need are strided in memory. Each 32-byte sector load wastes about half its bytes. That's inherent to how the Q4_K block layout interacts with warp-level parallelism&mdash;and it affects the upstream kernel (60% excessive) just as much as mine (62% excessive).</p>
+
+<p>This is a real optimization opportunity: cooperative warp loading of activations into shared memory with a coalesced access pattern could recover that 20%. But it would add shared memory usage and synchronization, which as we've seen is dangerous in memory-bound territory. That's a tradeoff I'm still thinking about.</p>
+
+<hr class="section-divider">
+
+<h2>The Tradeoff Framework</h2>
+
+<p>After six variants and hundreds of profiling runs, I started to see a pattern. Every GPU optimization trades something for something else. The trick is knowing which resource is abundant and which is scarce.</p>
+
+<div class="insight">
+  <p><strong>Trade what is abundant for what is scarce.</strong> In GEMV (AI = 2): parallelism is abundant, instruction budget is scarce&mdash;keep it simple. In GEMM (AI = 128): instruction budget is abundant, data bandwidth is scarce&mdash;tile aggressively.</p>
+</div>
+
+<table class="comparison">
+  <thead>
+    <tr>
+      <th>Trade</th>
+      <th>Helps When</th>
+      <th>Hurts When</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>More occupancy &harr; More smem</td>
+      <td>Compute-bound (hide latency)</td>
+      <td>Memory-bound (smem steals L1)</td>
+    </tr>
+    <tr>
+      <td>More parallelism &harr; More instructions</td>
+      <td>High AI (compute hides overhead)</td>
+      <td>Low AI (every instruction costs)</td>
+    </tr>
+    <tr>
+      <td>More data reuse &harr; More smem overhead</td>
+      <td>High reuse (GEMM: 128&times;)</td>
+      <td>No reuse (GEMV: 1&times;)</td>
+    </tr>
+    <tr>
+      <td>More async &harr; More complexity</td>
+      <td>High compute/memory ratio</td>
+      <td>Low compute/memory ratio</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>And here's the thing: <strong>the same 2pack strategy that costs me 11% on GEMV would <em>win</em> on GEMM.</strong> The 2.55M extra instructions are 0.002% of GEMM's 137 billion FLOPs&mdash;completely negligible. But the occupancy boost from 34% to 52% would give 15&ndash;20% more Tensor Core utilization. The technique isn't bad. I was applying it to the wrong workload.</p>
+
+<hr class="section-divider">
+
+<h2>Knowing When to Stop</h2>
+
+<p>After reaching competitive GEMV performance, I did something I probably should have done at the start: an impact analysis.</p>
+
+<table class="comparison">
+  <thead>
+    <tr>
+      <th>Kernel</th>
+      <th>% of Inference</th>
+      <th>Optimization Headroom</th>
+      <th>End-to-End Impact</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr class="highlight">
+      <td>GEMM</td>
+      <td>~90%</td>
+      <td>2&times; (40% &rarr; 80% of peak)</td>
+      <td><strong>~1.8&times; speedup</strong></td>
+    </tr>
+    <tr>
+      <td>Attention</td>
+      <td>~5%</td>
+      <td>Moderate</td>
+      <td>~2&ndash;5%</td>
+    </tr>
+    <tr>
+      <td>GEMV</td>
+      <td>~3%</td>
+      <td>30%</td>
+      <td>~0.9%</td>
+    </tr>
+  </tbody>
+</table>
+
+<p>GEMV is 3% of inference time. Even if I somehow matched upstream perfectly&mdash;a 10% GEMV improvement&mdash;that's a 0.3% end-to-end gain. Meanwhile, GEMM is 90% of the runtime. The same engineering skills applied to GEMM have <strong>200&times; more leverage</strong>.</p>
+
+<p>I stopped GEMV optimization. Not because I ran out of ideas&mdash;the uncoalesced activation load pattern is still sitting there with a potential 20% improvement. I stopped because the <strong>Pareto principle</strong> told me to pivot.</p>
+
+<div class="insight">
+  <p>The mature engineering decision isn't always "optimize harder." Sometimes it's recognizing where your skills have the most impact. The techniques that failed for GEMV&mdash;tiling, async pipelining, occupancy optimization&mdash;are exactly the techniques that dominate GEMM. Understanding <strong>when</strong> each technique applies is the real skill.</p>
+</div>
+
+<hr class="section-divider">
+
+<h2>What I Took Away</h2>
+
+<p><strong>Arithmetic intensity determines your entire optimization strategy.</strong> At AI = 2, minimize instructions. At AI = 128, maximize compute utilization. The same technique can help at one and hurt at the other.</p>
+
+<p><strong>Profile with Nsight Compute, not with intuition.</strong> I was convinced tiling would help. The numbers said otherwise. The scheduler statistics, the eligible warp counts, the L1 hit rates&mdash;these told the real story. When I saw "1 instruction per 4.6 cycles" on the activation tiling variant, that was the kind of signal you can only get from actual profiling.</p>
+
+<p><strong>Don't tile without reuse. Don't stage what's cached. Don't async without compute to hide behind.</strong> Every "best practice" has a regime where it becomes an anti-pattern. Knowing the boundary conditions is what separates reading GPU optimization blogs from doing GPU optimization.</p>
+
+<p><strong>The compiler is your best optimizer when you give it simple code.</strong> Upstream uses the most registers (66) of any variant and still produces the fewest instructions (4.78M). Simple code lets the compiler do its job.</p>
+
+<p><strong>Know when to stop and where to apply your skills next.</strong> GPU optimization is a tradeoff game&mdash;profile, identify the bottleneck, trade abundant resources for scarce ones, verify, iterate. And always ask: am I optimizing the right kernel?</p>
+
+</article>
+
+<footer class="footer">
+  <div class="cta-box">
+    <h3>Let's Talk GPU Kernels</h3>
+    <p>I'm looking for roles in GPU kernel optimization, HPC, and ML inference engineering.<br>Graduating May 2026 from Georgia Tech (M.S. CSE).</p>
+    <div class="cta-links">
+      <a href="https://linkedin.com/in/vijaykodamalla" class="cta-link" target="_blank">LinkedIn</a>
+      <a href="mailto:vkodamalla3@gatech.edu" class="cta-link">Email</a>
+      <!-- <a href="https://github.com/YOUR_USERNAME/quantized-gemv-optimization" class="cta-link" target="_blank">GitHub Repo</a> -->
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
