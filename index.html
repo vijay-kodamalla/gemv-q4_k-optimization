@@ -144,7 +144,7 @@
 
 <h2>Variant 1: Weight Tiling</h2>
 
-<p>The textbook optimization&mdash;tile weights into shared memory, reduce global memory traffic. I loaded 64 Q4_K blocks (9 KB) into shared memory per CTA.</p>
+<p>The textbook optimization&mdash;tile weights into shared memory, reduce global memory traffic. I loaded 32 Q4_K blocks (9 KB) into shared memory per CTA.</p>
 
 <p>It was slower. Here's what Nsight Compute told me:</p>
 
