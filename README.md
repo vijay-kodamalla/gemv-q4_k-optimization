@@ -4,7 +4,7 @@ Hey! Welcome to my repo. This is a deep dive into my journey of optimizing the m
 
 I started this project on an NVIDIA H200 to see how far I could push the HBM3e bandwidth, and ended up doing obsessive micro-benchmarking on an A100 to figure out why textbook optimizations sometimes just completely fail in the real world.
 
-**📖 Full Technical Write-up:** [I Built a Quantized GEMV Kernel from Scratch](https://vijayprabhas9.github.io/gemv_optimization/)
+**📖 Full Technical Write-up:** [I Built a Quantized GEMV Kernel from Scratch](https://vijay-kodamalla.github.io/gemv-q4_k-optimization/)
 
 ## The Story: The "Bandwidth Paradox"
 
