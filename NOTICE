@@ -1,0 +1,13 @@
+This project contains code derived from llama.cpp
+(https://github.com/ggml-org/llama.cpp), licensed under the MIT License.
+
+Copyright (c) 2023-2026 The ggml-org / llama.cpp contributors
+
+The patches in patches/ modify ggml/src/ggml-cuda/mmvq.cu from the llama.cpp
+project. The original upstream copyright and license notice is retained in
+those files. The kernel files in kernels/ are original work that links
+against llama.cpp's internal types and headers (block_q4_K, block_q8_1,
+vec_dot_q4_K_q8_1, and related CUDA utilities).
+
+See LICENSE for the full MIT license text under which this project's own
+code is released.

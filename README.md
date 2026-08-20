@@ -19,15 +19,16 @@ I went to work building my own custom kernels to beat the upstream `llama.cpp` i
 * **Nuclear Debugging:** Early asynchronous pipeline tests failed silently, so I had to inject synchronous error traps directly into the production hot path just to catch the GPU driver dropping my launch commands.
 * **Dynamic Batching:** I used a 2D Grid Launch (`blockIdx.y`) so the exact same kernel binary could handle single-token decoding or small batch prefill (Batch 1, 2, 3, 4) without falling back to a slower path. 
 
-## The 5 Kernel Variants Explored
+## The 6 Kernel Variants Explored
 
-I wrote 5 distinct kernel architectures to try and break the memory wall. You can find all the raw CUDA files in the `kernels/` directory.
+I wrote 6 distinct kernel architectures to try and break the memory wall. You can find all the raw CUDA files in the `kernels/` directory.
 
 1. **`y_tile.cu` (Activation Tiling):** Staged the activation vector in shared memory. Catastrophic failure. Nsight Compute proved my L1 cache hit rate was already 82.5% on global loads. By forcing the data into shared memory, I bypassed the hardware cache and introduced 1.7-way bank conflicts across 66% of my requests, tanking performance for zero benefit.
 2. **`w_tile.cu` (Weight Tiling):** Staged weights in shared memory using coalesced 128-bit loads. Fails because GEMV has zero data reuse (you touch a weight once and never again). Shared memory overhead was a pure penalty.
 3. **`2pack.cu` (100% Warp Utilization):** Q4_K math only needs 16 threads. To stop half the warp from idling, I forced the upper 16 threads to process a *second* block simultaneously and merged them with warp shuffles. Fastest custom variant, but indexing overhead was too high.
-4. **`tile_multiwarp.cu` & `2rowCTA.cu`:** Combined cooperative warp loading with shared memory tiles, testing both single-row and multi-row CTA geometry to maximize intra-CTA data reuse.
-5. **`double_buff.cu` (`cp.async` Pipeline):** Used hardware double-buffering to hide latency by fetching the next tile from global memory while computing the current tile.
+4. **`tile_multiwarp.cu`:** Combined cooperative warp loading with shared memory tiles, using single-row CTA geometry.
+5. **`2rowCTA.cu`:** Same cooperative warp-tiling approach as above, but with multi-row CTA geometry to increase intra-CTA data reuse.
+6. **`double_buff.cu`** (`cp.async` Pipeline): Used hardware double-buffering to hide latency by fetching the next tile from global memory while computing the current tile.
 
 ## The Hard Truth: Why Upstream Wins
 
@@ -40,16 +41,54 @@ My custom kernel was 11% slower (22.27 μs vs 20.03 μs). Why? I fired up Nsight
 
 **The ultimate lesson:** Decode-path GEMV performance is governed by scheduler health, not raw bandwidth or micro-tiling. Upstream wins because it keeps its instruction footprint incredibly small, tolerating uncoalesced accesses better than my complex indexing ever could.
 
-## How to Run It
+## Reproducing
 
-Because I built these kernels as isolated, hardcore experiments across different clusters, I am providing them as standalone drop-in files instead of a massive fork. 
+Each variant is a single patch against a pinned `llama.cpp` commit
+(`c00ff929d`), containing both the kernel and the `mmvq.cu` dispatch that
+launches it.
 
-If you want to compile and test a variant:
-1. Clone the upstream `llama.cpp` repository.
-2. Navigate to the CUDA backend directory (e.g., `ggml/src/ggml-cuda/`).
-3. Replace the upstream GEMV implementation with `kernels/mmvq.cu`.
-4. Drop your chosen kernel variant (e.g., `kernels/2pack.cu`) into the same directory and ensure it is included/called by the wrapper.
-5. Recompile the project using standard CMake instructions.
+```bash
+git clone https://github.com/ggml-org/llama.cpp && cd llama.cpp
+git checkout c00ff929dcfd150234e62f30e863bca4f1337aee
+
+export CUDA_ARCH=80   # your GPU's compute capability
+export NVCC=/usr/local/cuda/bin/nvcc
+
+bash repro-scripts/build.sh upstream
+bash repro-scripts/build.sh 2pack       # or: 2rowCTA, tile_multiwarp, w_tile, y_tile, double_buff
+
+./build_2pack/bin/test-backend-ops -o MUL_MAT
+```
+
+Full build environment and correctness results: **[REPRODUCING.md](REPRODUCING.md)**.
+Investigation into generation-level divergence from upstream and one kernel's
+known limitation: **[FINDINGS.md](FINDINGS.md)**.
+
+---
+
+## Status
+
+My best variant (`2pack`, 22.27 µs) is 11% slower than the upstream kernel
+(20.03 µs) on an A100. The interesting part is why: in a memory-bound regime
+at arithmetic intensity 2, instruction count dominates occupancy, warp
+utilization, and compute throughput. `2pack` beats upstream on every one of
+those three metrics and still loses, because it executes 53% more
+instructions.
+
+An impact analysis is what ended the optimization push here: GEMV is roughly
+3% of inference time, versus roughly 90% for GEMM. Techniques like tiling and
+async pipelining tend to pay off much more clearly on GEMM's higher
+arithmetic intensity — that's not a knock on GEMV, just a reason to point
+future effort where the multiplier is bigger.
+
+Six kernel variants were built, correctness-tested, and profiled. Five of six
+pass a CPU-reference-backed correctness check across 985 shapes on real
+hardware. `double_buff` has a known limitation for batched decode (multiple
+tokens per launch) — see FINDINGS.md for the specifics and scope. A separate
+investigation into generation-level output divergence from upstream (across 8
+prompts, all five passing kernels) found a real but modest effect, without a
+clean architectural explanation — full details, including a hypothesis that
+didn't hold up under more testing, in FINDINGS.md.
 
 ## Let's Connect!
 **Vijay Prabhas Kodamalla** Graduate Research Assistant, GPU Performance Engineering | M.S. Computational Science & Engineering @ Georgia Tech  
