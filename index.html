@@ -387,13 +387,43 @@ sum += <span class="fn">__shfl_down_sync</span>(mask16, sum, <span class="num">1
 
 <p><strong>Know when to stop and where to apply your skills next.</strong> GPU optimization is a tradeoff game&mdash;profile, identify the bottleneck, trade abundant resources for scarce ones, verify, iterate. And always ask: am I optimizing the right kernel?</p>
 
+<hr class="section-divider">
+
+<h2>Reproducibility Update &mdash; August 2026</h2>
+
+<p>The performance numbers above are from the original A100 measurement campaign, early 2026, and haven't been re-measured since. Separately, in August 2026, all six kernels were rebuilt from scratch and correctness-verified on an NVIDIA RTX PRO 6000 Blackwell &mdash; different hardware, checking a different thing. The two shouldn't be read as the same claim: the table below is about whether the kernels compute the right answer, not about how fast they are.</p>
+
+<table class="comparison">
+  <thead><tr><th>Variant</th><th>test-backend-ops</th><th>Generation vs upstream</th></tr></thead>
+  <tbody>
+    <tr><td>2rowCTA</td><td>Pass (985/985)</td><td>Differs</td></tr>
+    <tr><td>2pack</td><td>Pass (985/985)</td><td>Differs</td></tr>
+    <tr><td>tile_multiwarp</td><td>Pass (985/985)</td><td>Differs</td></tr>
+    <tr class="highlight"><td>w_tile</td><td>Pass (985/985)</td><td>Identical</td></tr>
+    <tr class="highlight"><td>y_tile</td><td>Pass (985/985)</td><td>Identical</td></tr>
+    <tr class="worst"><td>double_buff</td><td>Fails for ncols_dst &gt; 1</td><td>&mdash;</td></tr>
+  </tbody>
+</table>
+
+<p><code>test-backend-ops</code> checks the CUDA math against a CPU reference using numeric tolerance. A stricter check &mdash; fixed-seed, greedy generation, diffed exactly against upstream &mdash; catches something tolerance-based testing can't: a single floating-point ULP difference is enough to flip which token wins an argmax. Across 8 varied prompts, every kernel diverged from upstream on roughly a quarter to a third of them &mdash; small divergences, a word or two changing partway through a 64-token generation, consistent with floating-point addition not being associative across different reduction orders.</p>
+
+<div class="insight">
+  <p>The first four prompts fit a clean story: kernels that split reduction work across multiple warps diverged, single-warp kernels didn't. That story didn't survive a larger sample &mdash; on prompt 6, the single-warp kernels diverged while the multi-warp ones didn't, the reverse of the pattern. <strong>Divergence rate doesn't track kernel architecture at this sample size</strong>, and reporting a hypothesis that failed under more testing felt more honest than quietly dropping it.</p>
+</div>
+
+<div class="insight warning-insight">
+  <p><strong>double_buff</strong> fails correctness for batched decode (<code>ncols_dst &gt; 1</code>) &mdash; multiple tokens per launch &mdash; traced to an incompletely-masked warp shuffle in its reduction stage. It's verified for <code>ncols_dst = 1</code>, the single-token configuration the performance numbers above were measured under, and kept in the results scoped to that. The kernel logic wasn't changed in response to this, since doing so would break its link to the original measurement.</p>
+</div>
+
+<p>Full build instructions, the pinned commit, per-variant patches, and the complete correctness writeup are in the repo.</p>
+
 </article>
 
 <footer class="footer">
   <div class="cta-box">
     <h3>Let's Talk GPU Kernels</h3>
-    <p>I'm looking for roles in GPU kernel optimization, HPC, and ML inference engineering.<br>Graduating May 2026 from Georgia Tech (M.S. CSE).</p>
     <div class="cta-links">
+      <a href="https://github.com/vijay-kodamalla/gemv-q4_k-optimization" class="cta-link" target="_blank">GitHub</a>
       <a href="https://linkedin.com/in/vijaykodamalla" class="cta-link" target="_blank">LinkedIn</a>
       <a href="mailto:vkodamalla3@gatech.edu" class="cta-link">Email</a>
     </div>
